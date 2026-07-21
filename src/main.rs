@@ -1,10 +1,14 @@
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, poll}, execute, terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    event::{self, KeyEventKind,DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent},
+    execute, 
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
-    Frame, Terminal, backend::{Backend, CrosstermBackend}, layout::{Constraint, Direction, Layout}, widgets::{Block, Borders, Paragraph, block::title},
+    Frame, Terminal, backend::{Backend, CrosstermBackend}, 
+    layout::{Constraint, Direction, Layout}, 
+    widgets::{Block, Borders, Paragraph, block::title},
 };
-use std::{io, panic, time::Duration};
+use std::{io, panic};
 
 struct App {
     text: String,
@@ -57,6 +61,9 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
         terminal.draw(|f| ui(f, app))?;
         
         if let Event::Key(key) = event::read()? {
+            if key.kind!=KeyEventKind::Press{
+                continue;
+            }
             match key.code {
                 KeyCode::Char('c')if key.modifiers.contains(event::KeyModifiers::CONTROL)=>{
                     app.quit = true;
@@ -107,7 +114,7 @@ fn ui(frame: &mut Frame, app: &App) {
         ])
         .split(inner_area);
 
-    let title = Paragraph::new("Chat TUI")
+    let title = Paragraph::new("")
         .block(
             Block::default()
                 .borders(Borders::ALL)
