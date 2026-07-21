@@ -22,7 +22,7 @@ impl App {
 
 fn main() -> io::Result<()> {
     //设置终端
-    //enable_raw_mode()?;  // raw mode 会自动禁用回显
+    enable_raw_mode()?;  // raw mode 会自动禁用回显
     
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
