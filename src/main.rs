@@ -44,12 +44,22 @@ fn parse_args() {
             "-s" | "--server" => {
                 config::set_server_mode();
             }
+            "-n" | "--name" => {
+                if let Some(name) = args.next() {
+                    config::set_name(name);
+                }
+            }
             _ => {}
         }
     }
 }
 
 async fn async_main() -> anyhow::Result<()> {
+    let name = config::name()
+        .map(|s| s.to_string())
+        .unwrap_or_else(whoami::username);
+    let mut app = App::new(name);
+
     enable_raw_mode().context("enable_raw_mode failed")?;
 
     let mut stdout = io::stdout();
@@ -65,9 +75,6 @@ async fn async_main() -> anyhow::Result<()> {
         panic_hook(panic);
     }));
 
-    let username = whoami::username();
-    let mut app = App::new(username);
-
     // CLI overrides: skip menu
     if config::is_server() {
         app.start_server().await.context("failed to start server")?;
@@ -75,12 +82,12 @@ async fn async_main() -> anyhow::Result<()> {
         app.connect_to(addr.to_string()).await.context("failed to connect")?;
     }
 
-    let result = run_event_loop(&mut terminal, &mut app).await;
+    let _ = run_event_loop(&mut terminal, &mut app).await;
 
     disable_raw_mode().context("disable_raw_mode failed")?;
     execute!(io::stdout(), LeaveAlternateScreen).context("leave alt screen failed")?;
 
-    result
+    Ok(())
 }
 
 async fn run_event_loop(
@@ -104,8 +111,9 @@ async fn run_event_loop(
                 }
             }
             _ = tick.tick() => {
-                if matches!(app.mode, AppMode::Chat) {
-                    app.poll_messages();
+                match app.mode {
+                    AppMode::Chat => app.poll_messages(),
+                    AppMode::Menu(_) => app.poll_discovery(),
                 }
             }
         }
@@ -173,7 +181,7 @@ async fn handle_menu_event(app: &mut App, event: Event) -> bool {
                         menu.server_addr.pop();
                     }
                 }
-                KeyCode::Char(c) if c.is_ascii_graphic() || c == ' ' || c == ':' || c == '.' => {
+                KeyCode::Char(c) => {
                     if let AppMode::Menu(ref mut menu) = app.mode {
                         menu.server_addr.push(c);
                     }
@@ -182,6 +190,11 @@ async fn handle_menu_event(app: &mut App, event: Event) -> bool {
             }
             return false;
         }
+
+        let discovered_count = match &app.mode {
+            AppMode::Menu(m) => m.discovered_servers.len(),
+            _ => 0,
+        };
 
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return true,
@@ -200,6 +213,28 @@ async fn handle_menu_event(app: &mut App, event: Event) -> bool {
             KeyCode::Char('h') | KeyCode::Char('?') => {
                 if let AppMode::Menu(ref mut menu) = app.mode {
                     menu.show_help = !menu.show_help;
+                }
+            }
+
+            KeyCode::Char(c) if c.is_ascii_digit() && c >= '3' && c <= '9' => {
+                let idx = (c as u8 - b'0') as usize - 3;
+                if idx < discovered_count {
+                    let addr = match &app.mode {
+                        AppMode::Menu(m) => m.discovered_servers.get(idx).map(|(a, _)| a.clone()).unwrap_or_default(),
+                        _ => String::new(),
+                    };
+                    if !addr.is_empty() {
+                        if let AppMode::Menu(ref mut m) = app.mode {
+                            m.connecting = true;
+                        }
+                        let result = app.connect_to(addr).await;
+                        if let Err(e) = result {
+                            if let AppMode::Menu(ref mut m) = app.mode {
+                                m.connecting = false;
+                                m.error = Some(e.to_string());
+                            }
+                        }
+                    }
                 }
             }
 
@@ -223,9 +258,7 @@ async fn handle_chat_event(app: &mut App, event: Event) -> bool {
             KeyCode::Char('q') => return true,
             KeyCode::Esc => return true,
             KeyCode::Char(c) => {
-                if c.is_ascii_graphic() || c == ' ' {
-                    app.input.push(c);
-                }
+                app.input.push(c);
             }
             KeyCode::Backspace => {
                 app.input.pop();

@@ -16,6 +16,7 @@ pub struct MenuState {
     pub show_help: bool,
     pub connecting: bool,
     pub error: Option<String>,
+    pub discovered_servers: Vec<(String, std::time::Instant)>,
 }
 
 pub enum AppMode {
@@ -32,10 +33,13 @@ pub struct App {
     network: Option<Box<dyn Network>>,
     msg_rx: Option<mpsc::UnboundedReceiver<Message>>,
     broadcast_tx: Option<mpsc::UnboundedSender<Message>>,
+    discovery_rx: Option<mpsc::UnboundedReceiver<String>>,
 }
 
 impl App {
     pub fn new(username: String) -> Self {
+        let (discovery_tx, discovery_rx) = mpsc::unbounded_channel();
+        crate::network::discovery::spawn_listener(discovery_tx);
         Self {
             messages: Vec::with_capacity(MAX_MESSAGES),
             input: String::new(),
@@ -47,10 +51,12 @@ impl App {
                 show_help: false,
                 connecting: false,
                 error: None,
+                discovered_servers: Vec::new(),
             }),
             network: None,
             msg_rx: None,
             broadcast_tx: None,
+            discovery_rx: Some(discovery_rx),
         }
     }
 
@@ -90,14 +96,6 @@ impl App {
         if content.is_empty() {
             return;
         }
-        push_with_cap(
-            &mut self.messages,
-            ChatMessage {
-                time: Self::current_time(),
-                sender: self.username.clone(),
-                content: content.clone(),
-            },
-        );
         self.input.clear();
         if let Some(tx) = &self.broadcast_tx {
             let msg = Message::Text {
@@ -155,6 +153,30 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    const DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+
+    pub fn poll_discovery(&mut self) {
+        let rx = match &mut self.discovery_rx {
+            Some(rx) => rx,
+            None => return,
+        };
+        let now = std::time::Instant::now();
+        if let AppMode::Menu(ref mut menu) = self.mode {
+            while let Ok(addr) = rx.try_recv() {
+                if let Some(entry) = menu.discovered_servers.iter_mut().find(|(a, _)| a == &addr) {
+                    entry.1 = now;
+                } else {
+                    menu.discovered_servers.push((addr, now));
+                    if menu.discovered_servers.len() > 20 {
+                        menu.discovered_servers.remove(0);
+                    }
+                }
+            }
+            menu.discovered_servers
+                .retain(|(_, last_seen)| now.duration_since(*last_seen) < Self::DISCOVERY_TIMEOUT);
         }
     }
 

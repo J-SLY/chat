@@ -14,14 +14,14 @@ pub fn render(frame: &mut Frame, app: &App) {
             if menu.show_help {
                 render_help(frame);
             } else {
-                render_menu(frame, app, menu);
+                render_menu(frame, menu);
             }
         }
         AppMode::Chat => render_chat(frame, app),
     }
 }
 
-fn render_menu(frame: &mut Frame, _app: &App, menu: &MenuState) {
+fn render_menu(frame: &mut Frame, menu: &MenuState) {
     let area = frame.area();
 
     let block = Block::default().borders(Borders::ALL).title(" Lan Chat ");
@@ -31,7 +31,7 @@ fn render_menu(frame: &mut Frame, _app: &App, menu: &MenuState) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Percentage(30),
-            Constraint::Length(if menu.show_input { 5 } else { 3 }),
+            Constraint::Min(3),
             Constraint::Percentage(40),
         ])
         .split(
@@ -89,12 +89,33 @@ fn render_menu(frame: &mut Frame, _app: &App, menu: &MenuState) {
         )));
     }
 
+    if !menu.show_input && !menu.discovered_servers.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  ── LAN ──",
+            Style::default().fg(Color::DarkGray),
+        )));
+        for (i, (addr, _)) in menu.discovered_servers.iter().enumerate() {
+            let key = i + 3;
+            if key <= 9 {
+                lines.push(Line::from(Span::styled(
+                    format!("  [{}] {}", key, addr),
+                    Style::default().fg(Color::Green),
+                )));
+            } else {
+                break;
+            }
+        }
+    }
+
     let options = Paragraph::new(lines).alignment(Alignment::Left);
     frame.render_widget(options, inner[1]);
 
     // hint
     let hint_text = if menu.show_input {
         " Esc: Back  |  Enter: Connect "
+    } else if !menu.discovered_servers.is_empty() {
+        " Esc/q: Quit  |  1: Server  2: Connect  3-9: LAN  h: Help "
     } else {
         " Esc/q: Quit  |  1: Server  2: Connect  h: Help  Enter: Server "
     };
@@ -119,11 +140,12 @@ fn render_help(frame: &mut Frame) {
         Line::from(Span::styled(" ── 启动 ──", Style::default().fg(Color::Yellow))),
         Line::from(""),
         Line::from(" 服务端（本机）："),
-        Line::from("   [1] 启动服务端 → 等待他人连接"),
+        Line::from("   [1] 启动服务端 → 自动广播到局域网"),
         Line::from("   或命令行：cargo run -- --server"),
         Line::from(""),
         Line::from(" 客户端（他人）："),
         Line::from("   [2] 输入服务端的 IP:端口 → 回车"),
+        Line::from("   或按 [3] [4] ... 连接自动发现的服务器"),
         Line::from("   或命令行：cargo run -- --connect IP:端口"),
         Line::from(""),
         Line::from(Span::styled(" ── 聊天操作 ──", Style::default().fg(Color::Yellow))),
@@ -135,9 +157,10 @@ fn render_help(frame: &mut Frame) {
         Line::from(""),
         Line::from(Span::styled(" ── 命令行参数 ──", Style::default().fg(Color::Yellow))),
         Line::from(""),
-        Line::from("   --server / -s          跳过菜单，启动服务端"),
-        Line::from("   --connect <ip:port>    跳过菜单，直接连接"),
-        Line::from("   -p / --port <number>   指定端口（默认 9876）"),
+        Line::from("   --server / -s              跳过菜单，启动服务端"),
+        Line::from("   --connect <ip:port>        跳过菜单，直接连接"),
+        Line::from("   -p / --port <number>       指定端口（默认 9876）"),
+        Line::from("   -n / --name <昵称>          自定义昵称"),
         Line::from(""),
         Line::from(Span::styled(" 按任意键返回菜单", Style::default().fg(Color::DarkGray))),
     ];
@@ -217,3 +240,5 @@ fn render_chat(frame: &mut Frame, app: &App) {
     let y = chunks[2].y + 1;
     frame.set_cursor_position((x, y));
 }
+
+

@@ -63,6 +63,7 @@ impl Network for Client {
 
         let (reader, writer) = stream.into_split();
         let msg_tx = self.msg_tx.clone();
+        let msg_tx2 = msg_tx.clone();
         let broadcast_rx = self.broadcast_rx.take().unwrap();
 
         // send Join
@@ -79,7 +80,7 @@ impl Network for Client {
             .await
             .context("failed to send Join")?;
 
-        // writer task: broadcast_tx → server
+        // writer task: broadcast_tx → server, echo back to self
         let writer_handle = tokio::spawn(async move {
             let mut rx = broadcast_rx;
             let mut writer = writer_clone;
@@ -89,6 +90,7 @@ impl Network for Client {
                 if writer.write_all(json.as_bytes()).await.is_err() {
                     break;
                 }
+                let _ = msg_tx2.send(msg);
             }
         });
 

@@ -11,6 +11,7 @@ pub trait Network: Send {
 
 mod server;
 mod client;
+pub mod discovery;
 
 pub use server::Server;
 pub use client::Client;

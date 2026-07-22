@@ -74,6 +74,7 @@ impl Network for Server {
 
         let clients = self.clients.clone();
         let msg_tx = self.msg_tx.clone();
+        let msg_tx_for_broadcast = self.msg_tx.clone();
         let client_count = self.client_count.clone();
 
         let accept_handle = tokio::spawn(async move {
@@ -94,7 +95,7 @@ impl Network for Server {
             }
         });
 
-        // broadcast task: server user's own messages → all clients
+        // broadcast task: server user's own messages + web messages → all clients + app
         let broadcast_rx = self.broadcast_rx.take().unwrap();
         let clients_b = self.clients.clone();
         let bf_handle = tokio::spawn(async move {
@@ -104,11 +105,17 @@ impl Network for Server {
                 for (_id, conn) in clients.iter() {
                     let _ = conn.tx.send(msg.clone());
                 }
+                let _ = msg_tx_for_broadcast.send(msg);
             }
         });
 
         self._handles.push(accept_handle);
         self._handles.push(bf_handle);
+
+        // LAN discovery: broadcast presence via UDP multicast
+        let port = crate::config::port();
+        crate::network::discovery::spawn_announcer(port);
+
         Ok(())
     }
 }
