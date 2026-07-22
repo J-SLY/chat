@@ -1,130 +1,240 @@
-use crossterm::{
-    event::{self, KeyEventKind,DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent},
-    execute, 
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
-use ratatui::{
-    Frame, Terminal, backend::{Backend, CrosstermBackend}, 
-    layout::{Constraint, Direction, Layout}, 
-    widgets::{Block, Borders, Paragraph, block::title},
-};
-use std::{io, panic};
+mod app;
+mod config;
+mod network;
+mod protocol;
+mod ui;
 
-struct App {
-    text: String,
-    quit: bool,
+use crate::app::{App, AppMode};
+
+use anyhow::Context;
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::execute;
+use futures::StreamExt;
+use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
+use std::io;
+use std::panic;
+use std::time::Duration;
+
+fn main() -> anyhow::Result<()> {
+    env_logger::init();
+    parse_args();
+
+    let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
+    rt.block_on(async_main())
 }
 
-impl App {
-    fn new() -> Self {
-        Self {
-            text: String::new(),
-            quit: false,
+fn parse_args() {
+    let mut args = std::env::args().peekable();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-p" | "--port" => {
+                if let Some(port) = args.next() {
+                    if let Ok(port) = port.parse::<u16>() {
+                        config::set_port(port);
+                    }
+                }
+            }
+            "-c" | "--connect" => {
+                if let Some(addr) = args.next() {
+                    config::set_server_addr(addr);
+                }
+            }
+            "-s" | "--server" => {
+                config::set_server_mode();
+            }
+            _ => {}
         }
     }
 }
 
-fn main() -> io::Result<()> {
-    //设置终端
-    enable_raw_mode()?;  // raw mode 会自动禁用回显
-    
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+async fn async_main() -> anyhow::Result<()> {
+    enable_raw_mode().context("enable_raw_mode failed")?;
 
-    //崩溃时恢复终端 
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen).context("enter alt screen failed")?;
+
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend).context("terminal init failed")?;
+
     let panic_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
         panic_hook(panic);
     }));
 
-    let mut app = App::new();
-    let result = run_app(&mut terminal, &mut app);
+    let username = whoami::username();
+    let mut app = App::new(username);
 
-    //恢复终端
-    disable_raw_mode()?;
-    execute!(
-        io::stdout(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    
+    // CLI overrides: skip menu
+    if config::is_server() {
+        app.start_server().await.context("failed to start server")?;
+    } else if let Some(addr) = config::server_addr() {
+        app.connect_to(addr.to_string()).await.context("failed to connect")?;
+    }
+
+    let result = run_event_loop(&mut terminal, &mut app).await;
+
+    disable_raw_mode().context("disable_raw_mode failed")?;
+    execute!(io::stdout(), LeaveAlternateScreen).context("leave alt screen failed")?;
+
     result
 }
 
-fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<()> {
-    while !app.quit {
-        terminal.draw(|f| ui(f, app))?;
-        
-        if let Event::Key(key) = event::read()? {
-            if key.kind!=KeyEventKind::Press{
-                continue;
+async fn run_event_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+) -> anyhow::Result<()> {
+    let mut reader = EventStream::new();
+    let mut tick = tokio::time::interval(Duration::from_millis(50));
+
+    loop {
+        terminal.draw(|f| ui::render(f, app))?;
+
+        tokio::select! {
+            Some(Ok(event)) = reader.next() => {
+                let quit = match &app.mode {
+                    AppMode::Menu(_) => handle_menu_event(app, event).await,
+                    AppMode::Chat => handle_chat_event(app, event).await,
+                };
+                if quit {
+                    break;
+                }
             }
-            match key.code {
-                KeyCode::Char('c')if key.modifiers.contains(event::KeyModifiers::CONTROL)=>{
-                    app.quit = true;
+            _ = tick.tick() => {
+                if matches!(app.mode, AppMode::Chat) {
+                    app.poll_messages();
                 }
-                KeyCode::Char('q') => {
-                    app.quit = true;
-                }
-                KeyCode::Char(c) => {
-                    // 只添加可见字符
-                    if c.is_ascii_graphic() || c == ' ' {
-                        app.text.push(c);
-                    }
-                }
-                KeyCode::Backspace => {
-                    app.text.pop();
-                }
-                KeyCode::Enter => {
-                    app.text.push('\n');
-                }
-                KeyCode::Esc => {
-                    app.quit = true;
-                }
-                _ => {}
             }
         }
-        
-        
+
+        if app.quit {
+            break;
+        }
     }
+
     Ok(())
 }
 
-fn ui(frame: &mut Frame, app: &App) {
-    let area = frame.area();
-    
-    let main_block = Block::default()
-        .borders(Borders::ALL)
-        .title("Chat TUI");
-    
-    let inner_area = main_block.inner(area);
-    frame.render_widget(main_block, area);
+async fn handle_menu_event(app: &mut App, event: Event) -> bool {
+    if let Event::Key(key) = event {
+        if key.kind != KeyEventKind::Press {
+            return false;
+        }
+        // In help mode: most keys go back
+        if matches!(&app.mode, AppMode::Menu(m) if m.show_help) {
+            return match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => true,
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => true,
+                _ => {
+                    if let AppMode::Menu(ref mut menu) = app.mode {
+                        menu.show_help = false;
+                    }
+                    false
+                }
+            };
+        }
+        let is_inputting = matches!(&app.mode, AppMode::Menu(m) if m.show_input);
 
+        // In input mode: all chars go to address buffer
+        if is_inputting {
+            match key.code {
+                KeyCode::Esc => {
+                    // Cancel input, back to menu
+                    if let AppMode::Menu(ref mut menu) = app.mode {
+                        menu.show_input = false;
+                        menu.server_addr.clear();
+                    }
+                }
+                KeyCode::Char('q') => return true,
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
+                KeyCode::Enter => {
+                    let addr = match &app.mode {
+                        AppMode::Menu(m) => m.server_addr.trim().to_string(),
+                        _ => String::new(),
+                    };
+                    if !addr.is_empty() {
+                        if let AppMode::Menu(ref mut m) = app.mode {
+                            m.connecting = true;
+                        }
+                        let result = app.connect_to(addr).await;
+                        if let Err(e) = result {
+                            if let AppMode::Menu(ref mut m) = app.mode {
+                                m.connecting = false;
+                                m.error = Some(e.to_string());
+                            }
+                        }
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let AppMode::Menu(ref mut menu) = app.mode {
+                        menu.server_addr.pop();
+                    }
+                }
+                KeyCode::Char(c) if c.is_ascii_graphic() || c == ' ' || c == ':' || c == '.' => {
+                    if let AppMode::Menu(ref mut menu) = app.mode {
+                        menu.server_addr.push(c);
+                    }
+                }
+                _ => {}
+            }
+            return false;
+        }
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(70),
-            Constraint::Percentage(30)
-        ])
-        .split(inner_area);
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => return true,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
 
-    let title = Paragraph::new("")
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-        );
-    frame.render_widget(title, chunks[0]);
+            KeyCode::Char('1') => {
+                let _ = app.start_server().await;
+            }
 
-    let value = Paragraph::new(app.text.as_str())
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-        );
-    frame.render_widget(value, chunks[1]);
+            KeyCode::Char('2') => {
+                if let AppMode::Menu(ref mut menu) = app.mode {
+                    menu.show_input = true;
+                }
+            }
+
+            KeyCode::Char('h') | KeyCode::Char('?') => {
+                if let AppMode::Menu(ref mut menu) = app.mode {
+                    menu.show_help = !menu.show_help;
+                }
+            }
+
+            KeyCode::Enter => {
+                let _ = app.start_server().await;
+            }
+
+            _ => {}
+        }
+    }
+    false
+}
+
+async fn handle_chat_event(app: &mut App, event: Event) -> bool {
+    if let Event::Key(key) = event {
+        if key.kind != KeyEventKind::Press {
+            return false;
+        }
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
+            KeyCode::Char('q') => return true,
+            KeyCode::Esc => return true,
+            KeyCode::Char(c) => {
+                if c.is_ascii_graphic() || c == ' ' {
+                    app.input.push(c);
+                }
+            }
+            KeyCode::Backspace => {
+                app.input.pop();
+            }
+            KeyCode::Enter => {
+                app.send_message();
+            }
+            _ => {}
+        }
+    }
+    false
 }
