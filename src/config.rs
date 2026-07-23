@@ -116,3 +116,7 @@ pub fn load_saved_name() -> Option<String> {
 pub fn load_saved_user_id() -> Option<String> {
     load_config_user_id()
 }
+
+pub fn config_dir_for_history() -> PathBuf {
+    config_dir().join("history")
+}

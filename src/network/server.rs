@@ -1,4 +1,4 @@
-use crate::network::Network;
+use crate::network::{Network, CHANNEL_CAPACITY};
 use crate::protocol::{Message, PeerInfo};
 
 use anyhow::Context;
@@ -10,18 +10,26 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 
+impl Drop for Server {
+    fn drop(&mut self) {
+        for handle in &self._handles {
+            handle.abort();
+        }
+    }
+}
+
 struct ClientConn {
     info: PeerInfo,
-    tx: mpsc::UnboundedSender<Message>,
+    tx: mpsc::Sender<Message>,
 }
 
 pub struct Server {
     bind_addr: String,
     clients: Arc<RwLock<HashMap<String, ClientConn>>>,
-    msg_rx: Option<mpsc::UnboundedReceiver<Message>>,
-    msg_tx: mpsc::UnboundedSender<Message>,
-    broadcast_tx: mpsc::UnboundedSender<Message>,
-    broadcast_rx: Option<mpsc::UnboundedReceiver<Message>>,
+    msg_rx: Option<mpsc::Receiver<Message>>,
+    msg_tx: mpsc::Sender<Message>,
+    broadcast_tx: mpsc::Sender<Message>,
+    broadcast_rx: Option<mpsc::Receiver<Message>>,
     client_count: Arc<std::sync::atomic::AtomicUsize>,
     _handles: Vec<JoinHandle<()>>,
 }
@@ -30,8 +38,8 @@ impl Server {
     pub fn new(_username: String, _user_id: String) -> Self {
         let port = crate::config::port();
         let bind_addr = format!("0.0.0.0:{}", port);
-        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
-        let (broadcast_tx, broadcast_rx) = mpsc::unbounded_channel();
+        let (msg_tx, msg_rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let (broadcast_tx, broadcast_rx) = mpsc::channel(CHANNEL_CAPACITY);
 
         Self {
             bind_addr,
@@ -53,11 +61,11 @@ impl Network for Server {
         format!(" Server :{} | {} connected ", self.bind_addr, count)
     }
 
-    fn take_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<Message>> {
+    fn take_receiver(&mut self) -> Option<mpsc::Receiver<Message>> {
         self.msg_rx.take()
     }
 
-    fn broadcast_sender(&self) -> mpsc::UnboundedSender<Message> {
+    fn broadcast_sender(&self) -> mpsc::Sender<Message> {
         self.broadcast_tx.clone()
     }
 
@@ -98,19 +106,15 @@ impl Network for Server {
             let mut rx = broadcast_rx;
             while let Some(msg) = rx.recv().await {
                 let clients = clients_b.read().await;
-                for (_id, conn) in clients.iter() {
-                    let _ = conn.tx.send(msg.clone());
+                for conn in clients.values() {
+                    let _ = conn.tx.try_send(msg.clone());
                 }
-                let _ = msg_tx_for_broadcast.send(msg);
+                let _ = msg_tx_for_broadcast.try_send(msg);
             }
         });
 
         self._handles.push(accept_handle);
         self._handles.push(bf_handle);
-
-        // LAN discovery: broadcast presence via UDP multicast
-        let port = crate::config::port();
-        crate::network::discovery::spawn_announcer(port);
 
         Ok(())
     }
@@ -120,11 +124,11 @@ async fn handle_connection(
     stream: tokio::net::TcpStream,
     _remote_addr: String,
     clients: Arc<RwLock<HashMap<String, ClientConn>>>,
-    msg_tx: mpsc::UnboundedSender<Message>,
+    msg_tx: mpsc::Sender<Message>,
     client_count: Arc<std::sync::atomic::AtomicUsize>,
 ) {
     let (reader, writer) = stream.into_split();
-    let (conn_tx, mut conn_rx) = mpsc::unbounded_channel();
+    let (conn_tx, mut conn_rx) = mpsc::channel(CHANNEL_CAPACITY);
 
     let mut buf_reader = BufReader::new(reader);
     let mut first_line = String::new();
@@ -158,7 +162,7 @@ async fn handle_connection(
     client_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     // notify server app
-    let _ = msg_tx.send(Message::Join {
+    let _ = msg_tx.try_send(Message::Join {
         peer: peer.clone(),
     });
 
@@ -167,14 +171,14 @@ async fn handle_connection(
         let map = clients.read().await;
         let others: Vec<&ClientConn> = map.iter().filter(|(k, _)| *k != &id).map(|(_, v)| v).collect();
         for conn in &others {
-            let _ = conn.tx.send(Message::Join {
+            let _ = conn.tx.try_send(Message::Join {
                 peer: peer.clone(),
             });
         }
         // send user list to the new client
         let users: Vec<PeerInfo> = map.values().map(|c| c.info.clone()).collect();
         if let Some(me) = map.get(&id) {
-            let _ = me.tx.send(Message::UserList { peers: users });
+            let _ = me.tx.try_send(Message::UserList { peers: users });
         }
     }
 
@@ -182,7 +186,12 @@ async fn handle_connection(
     let _writer_handle: JoinHandle<()> = tokio::spawn(async move {
         let mut writer = writer;
         while let Some(msg) = conn_rx.recv().await {
-            let mut json = serde_json::to_string(&msg).unwrap();
+            let mut json = serde_json::to_string(&msg)
+                .unwrap_or_else(|e| {
+                    log::error!("failed to serialize msg: {e}");
+                    String::new()
+                });
+            if json.is_empty() { continue; }
             json.push('\n');
             if writer.write_all(json.as_bytes()).await.is_err() {
                 break;
@@ -201,11 +210,11 @@ async fn handle_connection(
                 if let Ok(msg) = serde_json::from_str::<Message>(&line_buf) {
                     match &msg {
                         Message::Text { .. } => {
-                            let _ = msg_tx.send(msg.clone());
+                            let _ = msg_tx.try_send(msg.clone());
                             let map = clients.read().await;
                             for (other_id, conn) in map.iter() {
                                 if *other_id != id {
-                                    let _ = conn.tx.send(msg.clone());
+                                    let _ = conn.tx.try_send(msg.clone());
                                 }
                             }
                         }
@@ -220,12 +229,12 @@ async fn handle_connection(
     // cleanup
     clients.write().await.remove(&id);
     client_count.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-    let _ = msg_tx.send(Message::Leave {
+    let _ = msg_tx.try_send(Message::Leave {
         peer: peer.clone(),
     });
     let map = clients.read().await;
-    for (_other_id, conn) in map.iter() {
-        let _ = conn.tx.send(Message::Leave {
+    for conn in map.values() {
+        let _ = conn.tx.try_send(Message::Leave {
             peer: peer.clone(),
         });
     }

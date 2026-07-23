@@ -25,7 +25,7 @@ fn bind_reusable(addr: &str) -> std::io::Result<std::net::UdpSocket> {
 
 /// Listen for UDP multicast announcements from LAN servers.
 /// Sends discovered "ip:port" strings into the given channel.
-pub fn spawn_listener(tx: mpsc::UnboundedSender<String>) {
+pub fn spawn_listener(tx: mpsc::Sender<String>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let std_socket = match bind_reusable(&format!("0.0.0.0:{}", DISCOVERY_PORT)) {
             Ok(s) => s,
@@ -39,25 +39,20 @@ pub fn spawn_listener(tx: mpsc::UnboundedSender<String>) {
             Ok(a) => a,
             Err(_) => return,
         };
-        let interface: std::net::Ipv4Addr = "0.0.0.0".parse().unwrap();
+        let interface: std::net::Ipv4Addr = "0.0.0.0".parse().expect("static address");
         let _ = socket.join_multicast_v4(multicast, interface);
         let mut buf = [0u8; 1024];
-        loop {
-            match socket.recv_from(&mut buf).await {
-                Ok((len, src)) => {
-                    if let Ok(ann) = serde_json::from_slice::<Announcement>(&buf[..len]) {
-                        let addr = format!("{}:{}", src.ip(), ann.port);
-                        let _ = tx.send(addr);
-                    }
-                }
-                Err(_) => break,
+        while let Ok((len, src)) = socket.recv_from(&mut buf).await {
+            if let Ok(ann) = serde_json::from_slice::<Announcement>(&buf[..len]) {
+                let addr = format!("{}:{}", src.ip(), ann.port);
+                let _ = tx.try_send(addr);
             }
         }
-    });
+    })
 }
 
 /// Periodically announce this server on the LAN via UDP multicast.
-pub fn spawn_announcer(port: u16) {
+pub fn spawn_announcer(port: u16) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await else {
             return;
@@ -77,5 +72,5 @@ pub fn spawn_announcer(port: u16) {
             interval.tick().await;
             let _ = socket.send_to(&bytes, dest).await;
         }
-    });
+    })
 }

@@ -134,6 +134,9 @@ async fn run_event_loop(
                     AppMode::Chat => handle_chat_event(app, event).await,
                 };
                 if quit {
+                    if matches!(app.mode, AppMode::Chat) {
+                        app.leave_chat();
+                    }
                     break;
                 }
             }
@@ -147,6 +150,9 @@ async fn run_event_loop(
         }
 
         if app.quit {
+            if matches!(app.mode, AppMode::Chat) {
+                app.leave_chat();
+            }
             break;
         }
     }
@@ -385,7 +391,7 @@ async fn handle_menu_event(app: &mut App, event: Event) -> bool {
                 }
             }
 
-            KeyCode::Char(c) if c.is_ascii_digit() && c >= '4' && c <= '9' => {
+            KeyCode::Char(c) if c.is_ascii_digit() && ('4'..='9').contains(&c) => {
                 let idx = (c as u8 - b'0') as usize - 4;
                 if idx < discovered_count {
                     let addr = match &app.mode {
@@ -431,8 +437,8 @@ fn handle_settings_username_input(app: &mut App, event: Event) -> bool {
                 }
                 false
             }
-            KeyCode::Char('q') => return true,
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
+            KeyCode::Char('q') => true,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => true,
             KeyCode::Enter => {
                 let new_name = match &app.mode {
                     AppMode::Menu(m) => m.username_input.trim().to_string(),
@@ -532,9 +538,7 @@ async fn handle_chat_event(app: &mut App, event: Event) -> bool {
                 }
                 app.cursor = p.min(app.input.len());
             }
-            KeyCode::Enter => {
-                app.send_message();
-            }
+            KeyCode::Enter if app.send_message() => return true,
             _ => {}
         }
     }
