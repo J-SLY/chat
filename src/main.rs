@@ -103,7 +103,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     // CLI overrides: skip menu
     if config::is_server() {
-        app.start_server().await.context("failed to start server")?;
+        app.start_server_bg().await.context("failed to start server")?;
     } else if let Some(addr) = config::server_addr() {
         app.connect_to(addr.to_string()).await.context("failed to connect")?;
     }
@@ -132,10 +132,13 @@ async fn run_event_loop(
                     AppMode::Setup => handle_setup_event(app, event).await,
                     AppMode::Menu(_) => handle_menu_event(app, event).await,
                     AppMode::Chat => handle_chat_event(app, event).await,
+                    AppMode::Server(_) => handle_server_event(app, event).await,
                 };
                 if quit {
                     if matches!(app.mode, AppMode::Chat) {
                         app.leave_chat();
+                    } else if matches!(app.mode, AppMode::Server(_)) {
+                        app.stop_server_and_back();
                     }
                     break;
                 }
@@ -144,6 +147,7 @@ async fn run_event_loop(
                 match app.mode {
                     AppMode::Chat => app.poll_messages(),
                     AppMode::Menu(_) => app.poll_discovery(),
+                    AppMode::Server(_) => app.poll_server_events(),
                     AppMode::Setup => {}
                 }
             }
@@ -152,6 +156,8 @@ async fn run_event_loop(
         if app.quit {
             if matches!(app.mode, AppMode::Chat) {
                 app.leave_chat();
+            } else if matches!(app.mode, AppMode::Server(_)) {
+                app.stop_server_and_back();
             }
             break;
         }
@@ -194,6 +200,7 @@ async fn handle_setup_event(app: &mut App, event: Event) -> bool {
                         edit_username: false,
                         username_input: String::new(),
                         username_cursor: 0,
+                        server_running: false,
                     });
                 }
                 false
@@ -368,6 +375,15 @@ async fn handle_menu_event(app: &mut App, event: Event) -> bool {
             KeyCode::Char('q') | KeyCode::Esc => return true,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
 
+            KeyCode::Char('0') => {
+                let is_running = matches!(&app.mode, AppMode::Menu(m) if m.server_running);
+                if is_running {
+                    app.stop_server();
+                } else {
+                    let _ = app.start_server_bg().await;
+                }
+            }
+
             KeyCode::Char('1') => {
                 let _ = app.start_server().await;
             }
@@ -540,6 +556,25 @@ async fn handle_chat_event(app: &mut App, event: Event) -> bool {
             KeyCode::Enter if app.send_message() => return true,
             _ => {}
         }
+    }
+    false
+}
+
+async fn handle_server_event(app: &mut App, event: Event) -> bool {
+    let Event::Key(key) = event else {
+        return false;
+    };
+    if key.kind != KeyEventKind::Press {
+        return false;
+    }
+    match key.code {
+        KeyCode::Char('q') | KeyCode::Esc => {
+            app.stop_server_and_back();
+        }
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.stop_server_and_back();
+        }
+        _ => {}
     }
     false
 }

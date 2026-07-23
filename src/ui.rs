@@ -25,6 +25,7 @@ fn set_cursor(frame: &mut Frame, area: Rect, input: &str, cursor: usize, line: u
 pub fn render(frame: &mut Frame, app: &App) {
     match &app.mode {
         AppMode::Setup => render_setup(frame, &app.username, app.cursor),
+        AppMode::Server(logs) => render_server(frame, logs),
         AppMode::Menu(menu) => {
             if menu.show_help {
                 render_help(frame);
@@ -140,28 +141,39 @@ fn render_menu(frame: &mut Frame, menu: &MenuState) {
     // options
     let mut lines = vec![
         Line::from(Span::styled(
-            "  [1] Start Server",
-            if !menu.show_input {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            },
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  [2] Connect to Server",
-            if menu.show_input {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            },
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  [3] Settings",
-            Style::default().fg(Color::Magenta),
+            if menu.server_running { "  [0] Stop Server" } else { "  [0] Server Only" },
+            Style::default().fg(Color::Cyan),
         )),
     ];
+    if menu.server_running {
+        lines.push(Line::from(Span::styled(
+            "       Server is running in background",
+            Style::default().fg(Color::Green),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  [1] Start Server (with chat)",
+        if !menu.show_input {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        },
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  [2] Connect to Server",
+        if menu.show_input {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        },
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  [3] Settings",
+        Style::default().fg(Color::Magenta),
+    )));
     if menu.show_input {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
@@ -210,9 +222,9 @@ fn render_menu(frame: &mut Frame, menu: &MenuState) {
     let hint_text = if menu.show_input {
         " Esc: Back  |  Enter: Connect "
     } else if !menu.discovered_servers.is_empty() {
-        " Esc/q: Quit  |  1: Server  2: Connect  3: Settings  4-9: LAN  h: Help "
+        " Esc/q: Quit  |  0: ServerOnly  1: Chat  2: Connect  3: Settings  4-9: LAN  h: Help "
     } else {
-        " Esc/q: Quit  |  1: Server  2: Connect  3: Settings  h: Help  Enter: Server "
+        " Esc/q: Quit  |  0: ServerOnly  1: Chat  2: Connect  3: Settings  h: Help  Enter: Chat "
     };
     let hint = Paragraph::new(hint_text)
         .style(Style::default().fg(Color::DarkGray))
@@ -231,6 +243,8 @@ fn render_help(frame: &mut Frame) {
         Line::from(Span::styled(" Lan Chat - 终端聊天室", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
         Line::from(""),
         Line::from(" 本机启动服务端，其他人用客户端连接即可聊天。"),
+        Line::from(" [0] Server Only 进入服务端控制台，实时查看连接日志。"),
+        Line::from("     日志自动保存到 ~/.config/rust-chat/server-logs/"),
         Line::from(""),
         Line::from(Span::styled(" ── 启动 ──", Style::default().fg(Color::Yellow))),
         Line::from(""),
@@ -259,7 +273,7 @@ fn render_help(frame: &mut Frame) {
         Line::from(""),
         Line::from(Span::styled(" ── 命令行参数 ──", Style::default().fg(Color::Yellow))),
         Line::from(""),
-        Line::from("   --server / -s              跳过菜单，启动服务端"),
+        Line::from("   --server / -s              跳过菜单，后台启动服务端"),
         Line::from("   --connect <ip:port>        跳过菜单，直接连接"),
         Line::from("   -p / --port <number>       指定端口（默认 9876）"),
         Line::from("   -n / --name <昵称>          自定义昵称"),
@@ -337,6 +351,61 @@ fn render_settings(frame: &mut Frame, menu: &MenuState, username: &str) {
         let cy = inner[1].y + 4;
         frame.set_cursor_position((cx, cy));
     }
+}
+
+fn render_server(frame: &mut Frame, logs: &[String]) {
+    let area = frame.area();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Server Console ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let log_height = inner.height.saturating_sub(2) as usize;
+    let start = if logs.len() > log_height {
+        logs.len() - log_height
+    } else {
+        0
+    };
+
+    fn level_style(level: &str) -> Style {
+        match level {
+            "[INFO]" => Style::default().fg(Color::Cyan),
+            "[WARN]" => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            "[ERROR]" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            "[DEBUG]" => Style::default().fg(Color::DarkGray),
+            _ => Style::default(),
+        }
+    }
+
+    let lines: Vec<Line> = logs[start..].iter().map(|line| {
+        let ts_end = line.find("] ").map(|i| i+2).unwrap_or(0);
+        if let Some(level_start) = line[ts_end..].find('[') {
+            let abs_start = ts_end + level_start;
+            if let Some(level_end) = line[abs_start..].find(']') {
+                let level_tag = &line[abs_start..abs_start+level_end+1];
+                let after_level = &line[abs_start+level_end+1..];
+                return Line::from(vec![
+                    Span::styled(&line[..ts_end], Style::default().fg(Color::DarkGray)),
+                    Span::styled(level_tag, level_style(level_tag)),
+                    Span::raw(after_level),
+                ]);
+            }
+        }
+        Line::from(Span::raw(line))
+    }).collect();
+
+    let widget = Paragraph::new(lines);
+    frame.render_widget(widget, inner);
+
+    let hint = Paragraph::new(" q/Esc/Ctrl+C: Stop server and back to menu ")
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(Alignment::Center);
+    let hint_area = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(area)[1];
+    frame.render_widget(hint, hint_area);
 }
 
 fn render_chat(frame: &mut Frame, app: &App) {

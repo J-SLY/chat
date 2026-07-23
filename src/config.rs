@@ -120,3 +120,7 @@ pub fn load_saved_user_id() -> Option<String> {
 pub fn config_dir_for_history() -> PathBuf {
     config_dir().join("history")
 }
+
+pub fn config_dir_for_server_logs() -> PathBuf {
+    config_dir().join("server-logs")
+}

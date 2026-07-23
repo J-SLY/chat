@@ -25,12 +25,14 @@ pub struct MenuState {
     pub edit_username: bool,
     pub username_input: String,
     pub username_cursor: usize,
+    pub server_running: bool,
 }
 
 pub enum AppMode {
     Setup,
     Menu(MenuState),
     Chat,
+    Server(Vec<String>),
 }
 
 pub struct App {
@@ -73,6 +75,7 @@ impl App {
                 edit_username: false,
                 username_input: String::new(),
                 username_cursor: 0,
+                server_running: false,
             }),
             network: None,
             msg_rx: None,
@@ -101,6 +104,52 @@ impl App {
         self.broadcast_tx = Some(broadcast_tx);
         self.mode = AppMode::Chat;
         Ok(())
+    }
+
+    pub async fn start_server_bg(&mut self) -> anyhow::Result<()> {
+        let mut network = Box::new(Server::new(self.username.clone(), self.user_id.clone()));
+        let msg_rx = network.take_receiver();
+        let broadcast_tx = network.broadcast_sender();
+        network.start().await?;
+        let announcer = crate::network::discovery::spawn_announcer(crate::config::port());
+        self._discovery_handles.push(announcer);
+        self.network = Some(network);
+        self.msg_rx = msg_rx;
+        self.broadcast_tx = Some(broadcast_tx);
+        self.mode = AppMode::Server(vec![
+            format!("[{}] [INFO] Server started on port {}", Self::current_time(), crate::config::port()),
+            format!("[{}] [DEBUG] LAN discovery enabled on 239.255.0.1:9877", Self::current_time()),
+        ]);
+        Ok(())
+    }
+
+    pub fn stop_server(&mut self) {
+        self.network = None;
+        self.msg_rx = None;
+        self.broadcast_tx = None;
+        if let AppMode::Menu(ref mut menu) = self.mode {
+            menu.server_running = false;
+        }
+    }
+
+    pub fn stop_server_and_back(&mut self) {
+        self.network = None;
+        self.msg_rx = None;
+        self.broadcast_tx = None;
+        self.mode = AppMode::Menu(MenuState {
+            server_addr: String::new(),
+            server_cursor: 0,
+            show_input: false,
+            show_help: false,
+            connecting: false,
+            error: None,
+            discovered_servers: Vec::new(),
+            show_settings: false,
+            edit_username: false,
+            username_input: String::new(),
+            username_cursor: 0,
+            server_running: false,
+        });
     }
 
     pub async fn connect_to(&mut self, addr: String) -> anyhow::Result<()> {
@@ -212,6 +261,40 @@ impl App {
                     },
                 );
                 false
+            }
+        }
+    }
+
+    pub fn poll_server_events(&mut self) {
+        if let Some(rx) = &mut self.msg_rx {
+            let logs = match &mut self.mode {
+                AppMode::Server(logs) => Some(logs),
+                _ => None,
+            };
+            if let Some(logs) = logs {
+                let mut changed = false;
+                while let Ok(msg) = rx.try_recv() {
+                    changed = true;
+                    let entry = match &msg {
+                        Message::Join { peer } => {
+                            format!("[{}] [INFO] {} connected", Self::current_time(), peer.name)
+                        }
+                        Message::Leave { peer } => {
+                            format!("[{}] [INFO] {} disconnected", Self::current_time(), peer.name)
+                        }
+                        Message::Text { sender_name, content, .. } => {
+                            format!("[{}] [INFO] {}: {}", Self::current_time(), sender_name, content)
+                        }
+                        Message::UserList { peers } => {
+                            let names: Vec<&str> = peers.iter().map(|p| p.name.as_str()).collect();
+                            format!("[{}] [INFO] Online: {}", Self::current_time(), names.join(", "))
+                        }
+                    };
+                    logs.push(entry);
+                }
+                if changed {
+                    save_server_logs(logs);
+                }
             }
         }
     }
@@ -366,4 +449,16 @@ fn push_with_cap(vec: &mut Vec<ChatMessage>, msg: ChatMessage) {
         vec.remove(0);
     }
     vec.push(msg);
+}
+
+fn save_server_logs(logs: &[String]) {
+    let dir = config::config_dir_for_server_logs();
+    let _ = std::fs::create_dir_all(&dir);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = dir.join(format!("server-{}.log", ts));
+    let content = logs.join("\n");
+    let _ = std::fs::write(&path, content);
 }
