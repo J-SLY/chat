@@ -509,7 +509,6 @@ async fn handle_chat_event(app: &mut App, event: Event) -> bool {
         }
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
-            KeyCode::Char('q') => return true,
             KeyCode::Esc => return true,
             KeyCode::Char(c) => {
                 app.input.insert(app.cursor, c);

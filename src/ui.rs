@@ -248,7 +248,7 @@ fn render_help(frame: &mut Frame) {
         Line::from("   字母/数字/空格   输入文字"),
         Line::from("   Backspace        删除"),
         Line::from("   Enter            发送"),
-        Line::from("   Ctrl+C / Esc / q 退出"),
+        Line::from("   Esc / Ctrl+C      退出"),
         Line::from(""),
         Line::from(Span::styled(" ── 命令 ──", Style::default().fg(Color::Yellow))),
         Line::from(""),
