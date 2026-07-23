@@ -7,19 +7,26 @@ const MAX_MESSAGES: usize = 1000;
 pub struct ChatMessage {
     pub time: String,
     pub sender: String,
+    pub sender_id: String,
     pub content: String,
 }
 
 pub struct MenuState {
     pub server_addr: String,
+    pub server_cursor: usize,
     pub show_input: bool,
     pub show_help: bool,
     pub connecting: bool,
     pub error: Option<String>,
     pub discovered_servers: Vec<(String, std::time::Instant)>,
+    pub show_settings: bool,
+    pub edit_username: bool,
+    pub username_input: String,
+    pub username_cursor: usize,
 }
 
 pub enum AppMode {
+    Setup,
     Menu(MenuState),
     Chat,
 }
@@ -27,7 +34,9 @@ pub enum AppMode {
 pub struct App {
     pub messages: Vec<ChatMessage>,
     pub input: String,
+    pub cursor: usize,
     pub username: String,
+    pub user_id: String,
     pub quit: bool,
     pub mode: AppMode,
     network: Option<Box<dyn Network>>,
@@ -37,21 +46,28 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(username: String) -> Self {
+    pub fn new(username: String, user_id: String) -> Self {
         let (discovery_tx, discovery_rx) = mpsc::unbounded_channel();
         crate::network::discovery::spawn_listener(discovery_tx);
         Self {
             messages: Vec::with_capacity(MAX_MESSAGES),
             input: String::new(),
+            cursor: 0,
             username,
+            user_id,
             quit: false,
             mode: AppMode::Menu(MenuState {
                 server_addr: String::new(),
+                server_cursor: 0,
                 show_input: false,
                 show_help: false,
                 connecting: false,
                 error: None,
                 discovered_servers: Vec::new(),
+                show_settings: false,
+                edit_username: false,
+                username_input: String::new(),
+                username_cursor: 0,
             }),
             network: None,
             msg_rx: None,
@@ -68,7 +84,7 @@ impl App {
     }
 
     pub async fn start_server(&mut self) -> anyhow::Result<()> {
-        let mut network = Box::new(Server::new(self.username.clone()));
+        let mut network = Box::new(Server::new(self.username.clone(), self.user_id.clone()));
         let msg_rx = network.take_receiver();
         let broadcast_tx = network.broadcast_sender();
         network.start().await?;
@@ -80,7 +96,7 @@ impl App {
     }
 
     pub async fn connect_to(&mut self, addr: String) -> anyhow::Result<()> {
-        let mut network = Box::new(Client::new(addr, self.username.clone()));
+        let mut network = Box::new(Client::new(addr, self.username.clone(), self.user_id.clone()));
         let msg_rx = network.take_receiver();
         let broadcast_tx = network.broadcast_sender();
         network.start().await?;
@@ -97,9 +113,11 @@ impl App {
             return;
         }
         self.input.clear();
+        self.cursor = 0;
         if let Some(tx) = &self.broadcast_tx {
             let msg = Message::Text {
-                sender: self.username.clone(),
+                sender_id: self.user_id.clone(),
+                sender_name: self.username.clone(),
                 content,
             };
             let _ = tx.send(msg);
@@ -110,12 +128,13 @@ impl App {
         if let Some(rx) = &mut self.msg_rx {
             while let Ok(msg) = rx.try_recv() {
                 match msg {
-                    Message::Text { sender, content } => {
+                    Message::Text { sender_id, sender_name, content } => {
                         push_with_cap(
                             &mut self.messages,
                             ChatMessage {
                                 time: Self::current_time(),
-                                sender,
+                                sender: sender_name,
+                                sender_id,
                                 content,
                             },
                         );
@@ -126,6 +145,7 @@ impl App {
                             ChatMessage {
                                 time: Self::current_time(),
                                 sender: "SYSTEM".into(),
+                                sender_id: String::new(),
                                 content: format!("{} joined", peer.name),
                             },
                         );
@@ -136,6 +156,7 @@ impl App {
                             ChatMessage {
                                 time: Self::current_time(),
                                 sender: "SYSTEM".into(),
+                                sender_id: String::new(),
                                 content: format!("{} left", peer.name),
                             },
                         );
@@ -147,6 +168,7 @@ impl App {
                             ChatMessage {
                                 time: Self::current_time(),
                                 sender: "SYSTEM".into(),
+                                sender_id: String::new(),
                                 content: format!("Online: {}", names.join(", ")),
                             },
                         );

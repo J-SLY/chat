@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 pub struct Client {
     server_addr: String,
     username: String,
+    user_id: String,
     msg_rx: Option<mpsc::UnboundedReceiver<Message>>,
     msg_tx: mpsc::UnboundedSender<Message>,
     broadcast_tx: mpsc::UnboundedSender<Message>,
@@ -20,12 +21,13 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(server_addr: String, username: String) -> Self {
+    pub fn new(server_addr: String, username: String, user_id: String) -> Self {
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         let (broadcast_tx, broadcast_rx) = mpsc::unbounded_channel();
         Self {
             server_addr,
             username,
+            user_id,
             msg_rx: Some(msg_rx),
             msg_tx,
             broadcast_tx,
@@ -69,6 +71,7 @@ impl Network for Client {
         // send Join
         let join_msg = Message::Join {
             peer: crate::protocol::PeerInfo {
+                id: self.user_id.clone(),
                 name: self.username.clone(),
             },
         };

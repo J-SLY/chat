@@ -15,10 +15,6 @@ struct ClientConn {
     tx: mpsc::UnboundedSender<Message>,
 }
 
-fn make_id(name: &str, addr: &str) -> String {
-    format!("{}@{}", name, addr)
-}
-
 pub struct Server {
     bind_addr: String,
     clients: Arc<RwLock<HashMap<String, ClientConn>>>,
@@ -31,7 +27,7 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(_username: String) -> Self {
+    pub fn new(_username: String, _user_id: String) -> Self {
         let port = crate::config::port();
         let bind_addr = format!("0.0.0.0:{}", port);
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
@@ -122,7 +118,7 @@ impl Network for Server {
 
 async fn handle_connection(
     stream: tokio::net::TcpStream,
-    remote_addr: String,
+    _remote_addr: String,
     clients: Arc<RwLock<HashMap<String, ClientConn>>>,
     msg_tx: mpsc::UnboundedSender<Message>,
     client_count: Arc<std::sync::atomic::AtomicUsize>,
@@ -148,7 +144,7 @@ async fn handle_connection(
         _ => return,
     };
 
-    let id = make_id(&peer.name, &remote_addr);
+    let id = peer.id.clone();
     {
         let mut map = clients.write().await;
         map.insert(
